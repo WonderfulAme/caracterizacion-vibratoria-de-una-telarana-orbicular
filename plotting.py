@@ -8,7 +8,7 @@ def plotNetwork(self):
     fig, ax = plt.subplots()
 
     # Dibujar hilos
-    for i, j, tipo in self.threads:
+    for i, j, tipo, _ in self.threads:
 
         x = [self.X[i, 0], self.X[j, 0]]
         y = [self.X[i, 1], self.X[j, 1]]
@@ -32,6 +32,6 @@ def plotNetwork(self):
     ax.set_ylabel("y [m]")
     ax.set_title("Spiderweb Network")
 
-    ax.legend()
+    ax.legend(loc="upper right")
 
     plt.savefig("informe/fig01_geometria.png", dpi=300, bbox_inches="tight")

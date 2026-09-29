@@ -18,7 +18,7 @@ class Network:
 
         # Geometría
         N = 28,                # Número de radiales
-        R_in=2.0*cm,           # Radio interno [m]
+        R_in=0.4*cm,           # Radio interno [m]
         Ds=0.4*cm,             # Separación entre anillos [m]
         R_anc=20.0*cm,         # Radio del marco [m]
 
@@ -30,7 +30,7 @@ class Network:
         E_S=3e6,               # Módulo de Young espiral [Pa]
 
         # Pretensión
-        T_R_medio=102.5*uN,    # Pretensión radial media [N]
+        T_R_avg=102.5*uN,    # Pretensión radial media [N]
         T_S=9.7*uN,             # Pretensión espiral [N]
 
         # Masa de la Araña
@@ -46,8 +46,9 @@ class Network:
         self.E_R = E_R
         self.d_S = d_S
         self.E_S = E_S
-        self.T_R_medio = T_R_medio
+        self.T_R_avg = T_R_avg
         self.T_S = T_S
+        self.m_spider = m_spider
 
         # Cálculo del número de anillos
         self.M = int(round((self.R_anc - self.Ds - self.R_in) / self.Ds)) + 1
@@ -76,7 +77,7 @@ class Network:
         print(f"Spiral Young modulus  : {self.E_S/1e6:.3f} MPa")
 
         print("\nPRETENSION")
-        print(f"Mean radial tension   : {self.T_R_medio/uN:.2f} uN")
+        print(f"Mean radial tension   : {self.T_R_avg/uN:.2f} uN")
         print(f"Spiral tension        : {self.T_S/uN:.2f} uN")
 
         print("------------------------------------------------------")
@@ -84,29 +85,24 @@ class Network:
 
     def pretensions(self):
 
-        # Pretensión de cada anillo
+        # Pretensión de cada hilo espiral
         T_S = np.full(self.M, self.T_S)
 
         # Incremento acumulado de tensión radial
-        inc = np.concatenate([
-            [0.0],
-            np.cumsum(
-                2*T_S*np.sin(np.pi/self.N)
-            )
-        ])
+        inc = np.concatenate([[0.0], np.cumsum(2*T_S*np.sin(np.pi/self.N))])
 
         # Pretensiones radiales
         T_R = np.zeros(self.M + 2)
 
-        T_R[1:] = (
-            self.T_R_medio
-            - inc.mean()
-            + inc
-        )
+        T_R[1:] = self.T_R_avg - inc.mean() + inc
 
         # Verificación física
         assert T_R[1] > 0, \
             "La pretensión radial interna resultó negativa"
+
+        # Guardar en el objeto
+        self.T_R = T_R
+        self.T_S_array = T_S
 
         return T_R, T_S
 
@@ -129,11 +125,7 @@ class Network:
                 # Cada nodo tiene un identificador único (n, m) de la forma (número de radial, número de anillo)
                 id_nodo[(n, m)] = len(X)
 
-                X.append([
-                    r[m-1]*np.cos(theta[n]),
-                    r[m-1]*np.sin(theta[n]),
-                    0.0
-                ])
+                X.append([r[m-1]*np.cos(theta[n]), r[m-1]*np.sin(theta[n]), 0.0])
 
                 fixed.append(False)
 
@@ -141,11 +133,7 @@ class Network:
         for n in range(self.N):
             id_nodo[(n, "A")] = len(X)
 
-            X.append([
-                self.R_anc*np.cos(theta[n]),
-                self.R_anc*np.sin(theta[n]),
-                0.0
-            ])
+            X.append([self.R_anc*np.cos(theta[n]), self.R_anc*np.sin(theta[n]), 0.0])
 
             fixed.append(True)
 
@@ -160,63 +148,184 @@ class Network:
 
         # Hilos radiales
         for n in range(self.N):
-            # Primeros hilos radiales desde el nodo central hasta el primer anillo
-            threads.append((self.id_nodo["hub"], self.id_nodo[(n, 1)], "R"))
+            # Hub -> primer anillo
+            threads.append((self.id_nodo["hub"], self.id_nodo[(n, 1)], "R", 1))
 
-            # Entre anillos
+            # Entre anillos consecutivos
             for m in range(2, self.M + 1):
-                threads.append(
-                    (
-                        self.id_nodo[(n, m-1)],
-                        self.id_nodo[(n, m)],
-                        "R"
-                    )
-                )
+                threads.append((self.id_nodo[(n, m-1)], self.id_nodo[(n, m)], "R", m))
 
-            # Ultimos hilos radiales desde el último anillo hasta el marco
-            threads.append((self.id_nodo[(n, self.M)], self.id_nodo[(n, "A")], "R"))
+            # Último anillo -> marco
+            threads.append((self.id_nodo[(n, self.M)], self.id_nodo[(n, "A")], "R", self.M + 1))
 
-        # -----------------------------
         # Hilos espirales
-        # -----------------------------
         for m in range(1, self.M + 1):
             for n in range(self.N):
-                threads.append(
-                    (
-                        self.id_nodo[((n-1) % self.N, m)],
-                        self.id_nodo[(n, m)],
-                        "S"
-                    )
-                )
+                threads.append((self.id_nodo[((n-1) % self.N, m)], self.id_nodo[(n, m)], "S", m))
 
         self.threads = threads
-
-
+    
     def threadProperties(self):
-        # Area de la sección transversal de los hilos
-        A_R = np.pi * self.d_R**2 / 4  # Radial 
-        A_S = np.pi * self.d_S**2 / 4  # Espiral
+        # Área de la sección transversal
+        A_R = np.pi * self.d_R**2 / 4   # Hilo radial
+        A_S = np.pi * self.d_S**2 / 4   # Hilo espiral
+
+        # Pretensiones
+        T_R, T_S = self.pretensions()
 
         threadsData = []
 
-        for i, j, tipo in self.threads:
-            # Calcular la longitud y el vector unitario del hilo
+        for i, j, tipo, m in self.threads:
+
+            # Longitud del hilo
             L = np.linalg.norm(self.X[i] - self.X[j])
+
+            # Vector unitario del hilo
             e = (self.X[i] - self.X[j]) / L
 
+            # Propiedades según el tipo de hilo
             if tipo == "R":
                 EA = self.E_R * A_R
+                T0 = T_R[m]
 
             else:
                 EA = self.E_S * A_S
+                T0 = T_S[m - 1]
+
+            # Rigidez axial del segmento
+            kappa = EA / L
 
             threadsData.append({
                 "i": i,
                 "j": j,
                 "L": L,
                 "e": e,
+                "A": A_R if tipo == "R" else A_S,
                 "EA": EA,
-                "tipo": tipo
+                "kappa": kappa,
+                "T0": T0,
+                "tipo": tipo,
+                "m": m
             })
 
         self.threadsData = threadsData
+
+    '''Para cada hilo, calcular la masa calcula las masas nodales de la red de araña'''
+    def nodalMasses(self):
+        mu = np.zeros(len(self.X))
+        for h in self.threadsData:
+            A = h["A"]              # Área de la sección transversal
+            lam = self.rho * A      # Masa por unidad de longitud
+            mh = lam * h["L"]       # Masa total del hilo
+
+            # Repartir la mitad en cada nodo
+            mu[h["i"]] += mh / 2
+            mu[h["j"]] += mh / 2
+
+        # Masa de la araña en el nodo central
+        mu[0] += self.m_spider * 0
+
+        self.mu = mu
+
+    def degreesOfFreedom(self):
+        free = np.where(~self.fixed)[0] # Nodos libres
+        dof = -np.ones((len(self.X), 3), dtype=int) # Inicialmente todos los grados de libertad son -1
+
+        for k, i in enumerate(free):
+            dof[i] = 3*k + np.arange(3) # asignar 3 grados de libertad cada uno de los nodos libres
+
+        # Número total de grados de libertad
+        ndof = 3 * len(free)
+
+        self.free = free
+        self.dof = dof
+        self.ndof = ndof
+
+    '''Matriz de rigidez para cada hilo'''
+    def threadStiffnessMatrix(self, h):
+
+        ke = (
+            h["T0"] / h["L"] * np.eye(3)
+            + (h["kappa"] - h["T0"] / h["L"])
+            * np.outer(h["e"], h["e"])
+        )
+
+        return ke
+
+    def globalStiffnessMatrix(self):
+
+        K = np.zeros((self.ndof, self.ndof))
+
+        for h in self.threadsData:
+
+            # Matriz elemental 3x3
+            ke = self.threadStiffnessMatrix(h)
+
+            # Matriz elemental completa 6x6
+            Ke = np.block([
+                [ ke, -ke],
+                [-ke,  ke]
+            ])
+
+            # Grados de libertad de los nodos i y j
+            dof_i = self.dof[h["i"]]
+            dof_j = self.dof[h["j"]]
+
+            # GDL del elemento completo
+            dof_h = np.concatenate([dof_i, dof_j])
+
+            # Ensamblaje en la matriz global
+            for a in range(6):
+                for b in range(6):
+
+                    if dof_h[a] != -1 and dof_h[b] != -1:
+                        K[dof_h[a], dof_h[b]] += Ke[a, b]
+
+        self.K = K
+
+    def globalMassMatrix(self):
+
+        Mdiag = np.repeat(
+            self.mu[self.free],
+            3
+        )
+
+        M = np.diag(Mdiag)
+
+        self.Mdiag = Mdiag
+        self.M = M
+
+    def verification(self):
+
+        # 1. Verificar que K sea simétrica
+        symmetry_error = (np.linalg.norm(self.K - self.K.T)/ np.linalg.norm(self.K))
+
+        # 2. Verificar equilibrio de fuerzas
+        F = np.zeros_like(self.X)
+        for h in self.threadsData:
+            # Fuerza de pretensión sobre los extremos del hilo
+            F[h["i"]] -= h["T0"] * h["e"]
+            F[h["j"]] += h["T0"] * h["e"]
+
+        # Solo revisar nodos libres
+        residual = np.max(np.abs(F[self.free]))
+
+        # Normalizar usando una tensión de referencia
+        residual_rel = residual / self.T_R[1]
+
+        # Verificaciones
+        assert np.allclose(self.K, self.K.T), \
+            f"La matriz de rigidez K no es simétrica. Error de Simetría: {symmetry_error:.2e}"
+        
+        assert residual_rel < 1e-6, \
+            f"La red no está en equilibrio. Residual de Equilibrio: {residual_rel:.2e}"
+
+        # 3. Verificar masas positivas
+        assert np.all(np.diag(self.M) > 0), \
+            f"La matriz de masa tiene elementos no positivos. Error: {np.diag(self.M)}"
+
+
+
+            
+
+        
